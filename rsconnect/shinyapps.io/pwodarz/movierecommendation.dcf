@@ -1,0 +1,13 @@
+name: movierecommendation
+title: movierecommendation
+username:
+account: pwodarz
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 6406840
+bundleId: 5965467
+url: https://pwodarz.shinyapps.io/movierecommendation/
+when: 1654035119.01013
+lastSyncTime: 1654035119.01013
+asMultiple: FALSE
+asStatic: FALSE

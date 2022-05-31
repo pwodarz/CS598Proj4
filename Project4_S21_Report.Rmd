@@ -1,0 +1,355 @@
+---
+title: 'Movie Recommendation App - Algorithm Selection and Web App Implementation'
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+date: "yr 2021"
+---
+
+```{r include=FALSE}
+library(dplyr)
+```
+
+
+## Authors
+Steve Su  
+Pierson Wodarz   
+University of Illinois - Urbana, Champaign; MCS  
+
+## Introduction
+The purpose of this project is to build an app which can give users recommended movies.  System one outputs recommended movies based on the user's desired genre.  System two gives the user recommended movies based on their movie ratings.  The app was built using the Shiny platform and the recommender algorithms used R's recommenderlab library.  The link to the app can be found here [Movie Recommender](https://steve303.shinyapps.io/RecommenderApp/).
+
+### Data
+The data set used in this project was sourced from [MovieLens](https://grouplens.org/datasets/movielens/). It has about 1 million anonymous ratings of approximately 3,900 movies made by 6,040 MovieLens users.  Movies are rated on a score between 1-5.   
+
+## System I
+
+### Overview
+For System I we aim to construct a recommendation based on genres. In particular, we look to recommend movies to the user based on a selected genre. For both proposed approaches, we recommend movies to the user in the same genre as the selected genre. 
+
+### Proposal I
+For the first genre recommendation system, we look to select recommend the 'top' movies in the genre which the user has selected. To do so, we first need to make two clarifications: 
+
+1. What is meant by 'top'?
+2. How do we define the genres for movies with multiple listed genres?
+
+We define 'top' as the weighted rating (WR), which is a true Bayesian estimate. The weighted ranking is defined as follows:
+
+$$WR = R \frac{v}{v+m} + C\frac{m}{v+m}$$
+
+Where:
+
+  * $R$ = mean review rating for the movie
+  * $v$ = number of reviews for the movie
+  * $m$ = vote threshold variable (controls weight of reviews with number of reviews above/below threshold)
+  * $C$ = mean review rating across all movies
+  
+Since we are recommending by genre, any movie which is listed under the selected genre will be considered for recommendation.
+  
+What we are attempting to accomplish by using the above formula is to obtain the ratings of movies according to their Bayesian estimate. This takes into account the number of reviews as well as the ratings in those reviews. Consider the following example reviews:
+
+  * Movie A: 5 Stars, 1 review
+  * Movie B: 4.3 Stars, 1,000 reviews
+  
+In this case, we are likely to feel/believe the rating for Movie B is accurate and representative, while we have much less certainty about the rating of Movie A given that it only has 1 review. To account for this we use the calculation for $WR$. This calculates a weighted rating for the movie, weighing both the mean rating for the movie, as well as the number of reviews received by the movie. 
+
+To implement this algorithm we perform the following: 
+
+1. First we load the data and transform for our purposes. 
+```{r, cache=TRUE}
+myurl = "https://liangfgithub.github.io/MovieData/"
+movies = readLines(paste0(myurl, 'movies.dat?raw=true'))
+movies = strsplit(movies, split = "::", fixed = TRUE, useBytes = TRUE)
+movies = matrix(unlist(movies), ncol = 3, byrow = TRUE)
+movies = data.frame(movies, stringsAsFactors = FALSE)
+colnames(movies) = c('MovieID', 'Title', 'Genres')
+movies$MovieID = as.integer(movies$MovieID)
+movies$Title = iconv(movies$Title, "latin1", "UTF-8")
+
+ratings = read.csv(paste0(myurl, 'ratings.dat?raw=true'), 
+                   sep = ':',
+                   colClasses = c('integer', 'NULL'), 
+                   header = FALSE)
+colnames(ratings) = c('UserID', 'MovieID', 'Rating', 'Timestamp')
+ratings$Timestamp = NULL
+```
+
+2. We then aggregate the data based on average rating per movie and count of reviews per movie. 
+```{r, cache=TRUE}
+aggregate = data.frame(ratings %>% group_by(MovieID) %>% summarise(mean_rating = mean(Rating), num_reviews = n()))
+head(aggregate)
+```
+
+3. Then we calculate the WR for each movie using the above definition. 
+
+In this case we define $m$ = 100 since we can see that a significant volume of movies have a number of ratings over 100, while some have less than 100. But in our instinctive impulse is to weigh those with 0 or less than 100 less. 
+```{r echo=FALSE}
+hist(table(ratings$MovieID), 
+     xlim=c(0, 3000), 
+     breaks = 300,
+     main = "Histogram of number of ratings",
+     xlab = "Rating count per individual movie"
+     )
+```
+
+Additionally, we aggregate over all genres. This is for ease of implementation. In particular, we assume that if something is rated highly across genres, it will be rated highly within genres. This is also a good approach as we would have to tailor $m$ to account for the number of reviews for movies within each genre, but by holding $m$ constant across genres we achieve higher consistency and ensure that WR doesn't move towards C for those movies in particular genres with a low number of ratings. 
+
+```{r}
+mean_C = mean(ratings$Rating)
+min_rev = 100
+aggregate$WR = with(aggregate, (mean_rating * (num_reviews / (num_reviews + min_rev))) + (mean_C * (min_rev / (num_reviews + min_rev))))
+head(aggregate)
+```
+
+4. Finally, we join this with our movies database.
+```{r}
+joined = merge(movies, aggregate, all = FALSE, by="MovieID")
+head(joined)
+```
+
+To make a prediction for a particular genre we can grab the top N movies ordered by WR. For example, the top 10 Children's movies could be determined as follows:
+```{r}
+result = joined %>% filter(grepl("Children's",Genres)) %>% arrange(desc(WR))
+result[1:10,]
+```
+
+### Proposal II
+
+For the second genre recommendation system, we seek to suggest those movies which are 'popular' in a given genre. To do so, we first need to provide a definition of 'popular'. Colloquially speaking, we associate 'popular' with many views or reviews. The number of reviews functions as a good proxy for a movies popularity, as the assumption is that a movie which is popular will have many reviews as it is being seen and talked about. We note that just because a movie is 'popular' (high review count) does not mean that it is good (high average rating). 
+
+Therefore, the popularity of a movie within a given genre is determined by the number of reviews for the movies within that genre. Similar to Proposal II, we will consider a movie for each genre it is associated with, so the same movie may be the most popular movie for the multiple genres with which it is associated. Reviewing the histogram presented in Proposal I, we see that a few movies are very popular and have a very high number of reviews.
+
+To implement the system, we can utilize the `joined` table which contains the count of reviews for each movie. 
+```{r}
+head(joined)
+```
+
+To select the top N movies for a given category, we then filter by category, and sort by count, choosing the top N movies from the table. 
+```{r}
+result = joined %>% filter(grepl("Children's",Genres)) %>% arrange(desc(num_reviews))
+result[1:10,]
+```
+
+We see that this produces a different ranking and set of Top 10 recommendations compared to Proposal I. 
+
+### Discussion
+Ultimately we decided to go with Proposal I as the weighted rating made the most intuitive sense for presenting the 'top' movies within a certain genre. It makes sense that when a user selects a genre that we would present the 'top' movies within that genre. We don't want to present 'popular' movies as suggested in Proposal II, as the popular movies may not be well rated. For a user looking for recommendation, the assumption is that they would want to watch a movie which is both good and popular for that genre. In this case, the weighted rating returns those movies which could be considered 'top' by balancing the number of reviews with the ratings for the movies within the genre. 
+
+We implemented this by storing the `joined` table as a file and referencing the file in our Shiny app to make the predictions based on the user-selected genre and the weighted rankings for movies which fall into the selected genre. 
+
+## System II  
+    
+### Overview  
+
+For this study we ran both UBCF (user based collaborative filtering) and IBCF (item based collaborative filtering) algorithms and compared them to a random selection algorithm.  Both algorithms require a collection of user movie ratings to make predictions.  This was sourced from MovieLens and contains roughly 1 million ratings of 3,900 movies by 6040 users. Having a sizable database is important for making good rating predictions.  Without it we will run into a cold start issue resulting in sub par predictions because we don't have sufficient data to base our recommendations on. Our goal is to rate each algorithm using RMSE as a metric and use the best algorithm for our recommender app.  
+
+### Proposal I  
+Both algorithms in system two calculate a similarity metric to make recommendations but differ in how it is determined.  UBCF calculates similarity between each user in the database with the active user. The active user is the one we wish to give recommendations to. The algorithm is similar to KNN (k nearest neighbors) where k is a chosen hyper-parameter representing the number of users in the neighborhood.  The algorithm finds the k nearest neighbors (based on similarity) and assumes that these users will like/dislike the same movies.  Based on this assumption, recommendations for the active user are calculated by taking the average ratings of the k users in the neighborhood.  Z score normalization was used to reduce bias in how users rated movies.  Mathematically, each predicted rating for the active user is described by:  
+
+$$R{a,j} = \frac{1}{|N(a)|}\sum_{i\in N(a)} R{i,j}$$
+where: 
+  
+  * $R{a,j}$ = predicted rating of movie j by active user
+  * $N(a)$ = neighborhood of users assigned to active user
+  * $R{i,j}$ = rating of movie j by user i  
+  
+Note, we chose to perform a non-weighted approach to calculate ratings.  This will eliminate the possibility that the denominator will be zero if the similarity of the active user is zero in relation all other users in the neighborhood. 
+  
+### Proposal II  
+In IBCF, similarity is based on items instead of users.  The assumption is that users will prefer items that are similar to other items they like.  A n x n similarity matrix is constructed and can be computed offline before the active user makes a query with the app thereby reducing the computation load.  To simplify things further, only the top k similarities need to be stored.  The recommendation is computed by taking a weighted average of the active user's ratings where the weights are the similarities between the k database users and the active user's ratings.  As in UBCF, we also normalized users ratings with Z score method.  The rating prediction can be described by the following equation:  
+$$R{a,i} = \frac{1}{\sum_{j\in Set(i) \cap [l;R{a,l}\ !=\ ?]} S{i,j}} \sum_{j\in Set(i) \cap [l;R{a,l}\ !=\ ?]}S{i,j}*R{a,j}$$
+where: 
+  
+  * $R{a,i}$ = predicted rating of movie i by active user
+  * $S{i,j}$ = similarity of movie i to movie j
+  * $R{a,j}$ = rating of movie j by active user
+  * $Set(i)$ = set of movies which are in the neighborhood of movie i
+  
+### Discussion
+
+To evaluate the two algorithms we performed a 10 fold cross validation where in each fold 80% of the data was used for training and the remaining 20% was used for test.  RMSE was calculated for each fold.  Besides the UBCF and IBCF, a random selection algorithm was run for reference.  
+
+Some of the parameters which were used for both UBCF and IBCF:  
+    
+  * k = 25, 
+  * given = 3
+  * normalize = Z-score, 
+  * method = Cosine (similarity metric).  
+  
+The "given" parameter specifies how many movies are given for evaluation for each observation.  The code to perform the evaluations are given below.  
+<br>
+*Evaluation Code of the Three Algorithms*
+```{r, message=FALSE}
+library(recommenderlab)
+library(Matrix)
+```
+
+```{r,results='hide'}
+#data source:
+#myurl = "https://liangfgithub.github.io/MovieData/ratings.dat?raw=true"
+
+#get rating.dat file locally:
+ratings = read.csv("./data/ratings.dat", 
+                   sep = ':',
+                   colClasses = c('integer', 'NULL'), 
+                   header = FALSE)
+colnames(ratings) = c('UserID', 'MovieID', 'Rating', 'Timestamp')
+ratings$Timestamp = NULL
+
+```
+
+```{r,results='hide'}
+#construct realRatingMatrix
+i = paste0('u', ratings$UserID)
+j = paste0('m', ratings$MovieID)
+x = ratings$Rating
+
+tmp = data.frame("i"= i, "j" = j, "x" = x, stringsAsFactors = TRUE)
+Rmat = sparseMatrix(as.integer(tmp$i), as.integer(tmp$j), x = tmp$x)  
+rownames(Rmat) = levels(tmp$i)
+colnames(Rmat) = levels(tmp$j)
+Rmat = new('realRatingMatrix', data = Rmat)
+```
+
+```{r, cache=TRUE, results='hide'}
+set.seed(0303)
+esSplit = evaluationScheme(Rmat, method="cross-validation",
+                           train = 0.8, k=10, given = 3)
+```
+
+```{r, cache=TRUE, results='hide'}
+#see p.30 https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
+time_in = Sys.time()
+algorithms = list("random" = list(name = "Random", param = list(normalize = "Z-score")), 
+                  "ubcf" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 25)),
+                  "ibcf" = list(name = "IBCF", param = list(normalize = "Z-score", method = "Cosine", k = 25))
+                  )
+eval_ubcf = evaluate(esSplit, method = algorithms, type = "ratings" )
+time_out = Sys.time()
+```   
+    
+```{r, include=FALSE}
+tot_time = difftime(time_out, time_in, units = "mins")
+print(tot_time)
+``` 
+
+```{r, include=TRUE}
+
+table_random = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_ubcf = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_ibcf = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+for (i in 1:10){
+  table_random[i,] = eval_ubcf[[1]]@results[[i]]@cm
+  table_ubcf[i,] = eval_ubcf[[2]]@results[[i]]@cm
+  table_ibcf[i,] = eval_ubcf[[3]]@results[[i]]@cm
+}
+
+```
+<br>
+*Table 1. RMSE Values for Each Fold and Each Algorithm*
+```{r}
+df = cbind(c(1:10, "Ave."), 
+           round(c(table_random$RMSE, mean(table_random$RMSE)), 2), 
+           round(c(table_ubcf$RMSE, mean(table_ubcf$RMSE)), 2), 
+           round(c(table_ibcf$RMSE, mean(table_ibcf$RMSE)), 2))
+
+knitr::kable(df, col.names = c("Fold", "Random","UBCF", "IBCF"))
+```
+<br>
+*Figure 1. Average RMSE Values for Random, UBCF and IBCF Algorithms*
+```{r, echo=FALSE}
+
+barplot( height = c(mean(table_random$RMSE),mean(table_ubcf$RMSE), mean(table_ibcf$RMSE)), 
+         names.arg = c("Random","UBCF", "IBCF"), main = "10 Fold Average RMSE", ylab = "error")
+
+```
+    
+    
+The UBCF turned out to have the lowest RMSE, a value of 1.22.  Surprisingly the random algorithm performed similarly to the  IBCF algorithm; their scores were both 1.47 which is not too far off from the UBCF's score .  This suggests that our UBCF algorithm could use some improvement.     
+
+In an attempt to improve our algorithm, we performed an optimization to specify k.  Increasing k from 25 to 200 lowered the RMSE by 7% from 1.216 to 1.131, respectively, but further increases showed little improvement, roughly 1% (figure 2).  The evaluation code is shown below.  
+
+<br>
+*k Value Optimiztion Code*
+```{r optimize01, cache=TRUE, results='hide'}
+
+algorithms_nn01 <- list("UBCF_100" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 100)),
+                   "UBCF_200" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 200)),
+                   "UBCF_600" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 600)))
+
+eval_ubcf_nn01 = evaluate(esSplit, method = algorithms_nn01, type = "ratings" )
+
+```
+
+
+```{r ,eval=TRUE,include=TRUE}
+
+table_n100 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_n200 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_n600 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+
+for (i in 1:10){
+  table_n100[i,] = eval_ubcf_nn01[[1]]@results[[i]]@cm
+  table_n200[i,] = eval_ubcf_nn01[[2]]@results[[i]]@cm
+  table_n600[i,] = eval_ubcf_nn01[[3]]@results[[i]]@cm
+}
+
+```
+
+
+
+```{r , optimize05, cache=TRUE, results='hide'}
+
+algorithms_nn05 <- list("UBCF_1000" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 1000)),
+                   "UBCF_4000" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 4000)),
+                   "UBCF_6000" = list(name = "UBCF", param = list(weighted = FALSE, normalize = "Z-score", method = "Cosine", nn = 6000)))
+
+eval_ubcf_nn05 = evaluate(esSplit, method = algorithms_nn05, type = "ratings" )
+
+```
+
+```{r, eval=TRUE, include=TRUE}
+table_n1000 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_n4000 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+table_n6000 = data.frame("RMSE" = rep(0, 10), "MSE" = rep(0,10), "MAE"= rep(0,10))
+
+for (i in 1:10){
+  table_n1000[i,] = eval_ubcf_nn05[[1]]@results[[i]]@cm
+  table_n4000[i,] = eval_ubcf_nn05[[2]]@results[[i]]@cm
+  table_n6000[i,] = eval_ubcf_nn05[[3]]@results[[i]]@cm 
+}
+c(mean(table_ubcf$RMSE),mean(table_n100$RMSE), mean(table_n200$RMSE), mean(table_n1000$RMSE),mean(table_n4000$RMSE), mean(table_n6000$RMSE))
+```
+<br>
+*Figure 2. Average UBCF RMSE Values For K values*
+
+```{r, echo=TRUE}
+barplot( height = c(mean(table_ubcf$RMSE), mean(table_n100$RMSE), mean(table_n200$RMSE), mean(table_n600$RMSE), mean(table_n1000$RMSE),mean(table_n4000$RMSE), mean(table_n6000$RMSE)), 
+         names.arg = c("k=25", "k=100", "k=200", "k=600", "k=1000", "k=4000", "k=6000"), main = "10 Fold Average RMSE - K Optimization", ylab = "error")
+
+```
+
+Even though UBCF performed better than IBCF, UBCF has some drawbacks.  These include, the whole data base has to be stored in memory and the similarity computation between each user in the data base and the active user cannot be done offline.  Just to compute similarity, the complexity will be O(n*m) where n is the number of users and m is the number of movies.  For a huge database this can be big strain our app.  To minimize this bottle neck we borrowed code from [Spachtholz](https://github.com/pspachtholz/BookRecommender).  It requires additional R scripts, cf_algorithm.R and similarity_measures.R which make computation more efficient by optimizing similarity calculations for sparse matrices.  The source can be found here, [Smartcat](https://smartcat.io/blog/data-science/improved-r-implementation-of-collaborative-filtering/). 
+
+## Summary
+In the end, our app was successfully deployed without much delay predicting recommendations (system two) due in part by applying Splachtholz and Smartcat's code to compute the similarity matrix more efficiently.  There are several areas which could be improved.  These include, providing more movie choices to rate, allowing the user to apply a filter, i.e. year, director.  Since our chosen UBCF algorithm did not perform significantly better than the random selection algorithm, this suggests there is room for improvement.  One idea is to use user profile data such as age, sex, profession, etc. to create more representative similarity scores between users.  This can be especially helpful when the user has only ranked a few movies.  Currently if the active user only ranks one or two movies the calculated similarity values are pretty useless.  There is not enough data to calculate a meaningful similarity value.  This can be demonstrated when using our app.  To demonstrate the opposite effect, we ranked many comedies with high scores.  As a result, our app recommended many comedies, thus showing that the algorithm was able to calculate meaningful similarity scores when more data was provided.  The scope of this project was confined to using a small range of algorithms which would not satisfy the needs of a large commercial recommender system.    
+    
+## Resources  
+1.  [Quora: What algorithm does IMDB use for ranking the movies on its site?](https://www.quora.com/What-algorithm-does-IMDB-use-for-ranking-the-movies-on-its-site?share=1)
+2.  [demo code kaggle Spachtholz](https://www.kaggle.com/philippsp/book-recommender-collaborative-filtering-shiny)  
+3.  [smartcat code](https://smartcat.io/blog/data-science/improved-r-implementation-of-collaborative-filtering/)
+4.  [data source movielens](https://grouplens.org/datasets/movielens/)
+5.  [prof's code EDA](https://liangfgithub.github.io/Rcode_W13_Movie_EDA.nb.html)  
+6.  [prof's code recommender](https://liangfgithub.github.io/Rcode_W13_Movie_RS.nb.html)  
+7.  [git demo code Spachtolz](https://github.com/pspachtholz/BookRecommender)  
+8.  [recommenderlab Hahsler](https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf)
+
+
+
+
+
+
